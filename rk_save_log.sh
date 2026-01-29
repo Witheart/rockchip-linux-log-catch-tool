@@ -37,6 +37,15 @@ cat /etc/machine-id > machine-id.log
 journalctl --list-boots > list-boots.log
 
 # =============================
+# 获取 SN 与 运行 Stress 测试
+# =============================
+echo "[INFO] 正在获取 SN 信息..."
+i2ctransfer -y -f 6 w2@0x57 0x10 0x00 r30 > SN 2>&1
+
+echo "[INFO] 正在收集日志..."
+stressapptest -s 20 -i 4 -C 4 -W --stop_on_errors -M 13000 > test 2>&1
+
+# =============================
 # dmesg（当前启动）
 # =============================
 echo "[INFO] 保存当前启动的 dmesg..."
