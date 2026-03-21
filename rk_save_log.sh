@@ -34,6 +34,10 @@ fi
 
 cat /etc/machine-id > machine-id.log
 
+if [ -f /sys/kernel/debug/dri/0/summary ]; then
+    cat /sys/kernel/debug/dri/0/summary > dri.log
+fi
+
 journalctl --list-boots > list-boots.log
 
 # =============================
@@ -119,9 +123,33 @@ case "$choice" in
 esac
 
 # =============================
-# 收尾
+# 收尾：打包与加密
 # =============================
 echo
-echo "[DONE] 日志收集完成："
-ls -lh "$LOG_DIR"
+echo "[INFO] 正在打包日志..."
+
+# 返回上级目录进行打包
+cd "$SCRIPT_DIR"
+
+ZIP_NAME="log-${TIMESTAMP}.zip"
+DIR_NAME="log-${TIMESTAMP}"
+
+# 检查 zip 命令是否存在
+if command -v zip >/dev/null 2>&1; then
+    # -r 递归, -P 密码, -q 安静模式
+    zip -r -q -P "Pi3.14159" "$ZIP_NAME" "$DIR_NAME"
+    
+    if [ $? -eq 0 ]; then
+        echo "[INFO] 打包成功：$ZIP_NAME"
+        rm -rf "$DIR_NAME"
+    else
+        echo "[ERROR] 打包失败。"
+    fi
+else
+    echo "[ERROR] 未找到 zip 命令，无法打包。"
+fi
+
+echo
+echo "[DONE] 操作完成："
+ls -lh "$ZIP_NAME" 2>/dev/null || ls -ld "$DIR_NAME"
 
