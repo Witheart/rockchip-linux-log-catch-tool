@@ -39,9 +39,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ==========================================
-# 0. 工具链可用性检查
+# 0. 工具链可用性检查 (已加入 xrandr)
 # ==========================================
-REQUIRED_TOOLS=("i2ctransfer" "zip" "top" "iostat" "journalctl" "awk" "sed" "grep")
+REQUIRED_TOOLS=("i2ctransfer" "zip" "top" "iostat" "journalctl" "awk" "sed" "grep" "xrandr")
 MISSING_TOOLS=()
 
 for tool in "${REQUIRED_TOOLS[@]}"; do
@@ -55,7 +55,7 @@ if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
     if [ "$IGNORE_TOOLS" = true ]; then
         echo "[!] 参数 --ignore 已启用，跳过工具检查，继续执行..."
     else
-        echo "[-] 请先安装缺失的工具。例如: sudo apt-get update && sudo apt-get install i2c-tools zip sysstat"
+        echo "[-] 请先安装缺失的工具。例如: sudo apt-get update && sudo apt-get install i2c-tools zip sysstat x11-xserver-utils"
         echo "[-] 或者附加 '-i' 或 '--ignore' 参数运行以忽略此错误。"
         exit 1
     fi
@@ -87,7 +87,7 @@ fi
 echo "[*] 检测到芯片架构: $CHIP_TYPE (设备树: $MODEL_INFO)"
 
 # ==========================================
-# 2. 读取并转换 SN 逻辑 (修复解析问题，支持 0x00 截断)
+# 2. 读取并转换 SN 逻辑 (支持 0x00 截断)
 # ==========================================
 SN_STR=""
 echo "[*] 正在从 I2C-$I2C_BUS 读取硬件 SN..."
@@ -153,6 +153,9 @@ df -h > "$LOG_DIR/layer1_disk_usage.txt" 2>&1
 mount > "$LOG_DIR/layer1_mount_status.txt" 2>&1
 cat /etc/machine-id > "$LOG_DIR/layer1_machine_id.txt" 2>&1
 cat /sys/kernel/debug/dri/0/summary > "$LOG_DIR/layer1_dri_summary.txt" 2>&1
+
+# 抓取 X11/Wayland 屏幕显示架构状态 (如在无图形界面下运行，会捕获错误信息作为参考)
+xrandr --verbose > "$LOG_DIR/layer1_xrandr_display.txt" 2>&1
 
 # ==========================================
 # 🟡 第二层：Rockchip 独有硬件层 -> 每份日志单独保存
