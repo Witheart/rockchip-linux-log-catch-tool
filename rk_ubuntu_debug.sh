@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ==========================================
-# 0. 工具链可用性检查 (已加入 xrandr)
+# 0. 工具链可用性检查与动态定制安装提示
 # ==========================================
 REQUIRED_TOOLS=("i2ctransfer" "zip" "top" "iostat" "journalctl" "awk" "sed" "grep" "xrandr")
 MISSING_TOOLS=()
@@ -51,12 +51,38 @@ for tool in "${REQUIRED_TOOLS[@]}"; do
 done
 
 if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
-    echo "[-] 警告: 发现缺失的必要工具: ${MISSING_TOOLS[*]}"
+    echo "[-] 警告: 发现系统缺失以下必要工具: ${MISSING_TOOLS[*]}"
+    
+    # 建立工具到具体 Ubuntu 软件包的映射树
+    declare -A PKG_MAP
+    PKG_MAP[i2ctransfer]="i2c-tools"
+    PKG_MAP[zip]="zip"
+    PKG_MAP[top]="procps"
+    PKG_MAP[iostat]="sysstat"
+    PKG_MAP[journalctl]="systemd"
+    PKG_MAP[awk]="gawk"
+    PKG_MAP[sed]="sed"
+    PKG_MAP[grep]="grep"
+    PKG_MAP[xrandr]="x11-xserver-utils"
+
+    # 聚合真正需要安装的底层 deb 包名（去重）
+    NEED_INSTALL_PKGS=""
+    for m_tool in "${MISSING_TOOLS[@]}"; do
+        pkg_name=${PKG_MAP[$m_tool]}
+        if [[ ! "$NEED_INSTALL_PKGS" =~ "$pkg_name" ]]; then
+            NEED_INSTALL_PKGS="$NEED_INSTALL_PKGS $pkg_name"
+        fi
+    done
+
     if [ "$IGNORE_TOOLS" = true ]; then
-        echo "[!] 参数 --ignore 已启用，跳过工具检查，继续执行..."
+        echo "[!] 参数 --ignore 已启用，跳过工具限制强行执行（部分指令可能由于缺失包而无输出）..."
     else
-        echo "[-] 请先安装缺失的工具。例如: sudo apt-get update && sudo apt-get install i2c-tools zip sysstat x11-xserver-utils"
-        echo "[-] 或者附加 '-i' 或 '--ignore' 参数运行以忽略此错误。"
+        echo "========================================================="
+        echo "[-] 错误: 核心依赖不满足，脚本终止。"
+        echo "[-] 请执行以下命令安装缺失的组件，然后重新运行脚本:"
+        echo "    sudo apt-get update && sudo apt-get install -y$NEED_INSTALL_PKGS"
+        echo "========================================================="
+        echo "[-] 提示: 你也可以追加 '-i' 或 '--ignore' 参数直接跳过环境检查。"
         exit 1
     fi
 fi
@@ -266,7 +292,7 @@ for (( i=0; i<LOOP_LIMIT; i++ )); do
 done
 
 # ==========================================
-# 6. 加密压缩与彻底清理
+# 6. 加密压缩与彻底清理 (带Log路径和回传研发提示)
 # ==========================================
 ZIP_TARGET="/tmp/${DIR_NAME}.zip"
 echo "[*] 数据采集完毕，开始进行密码加密打包..."
@@ -276,14 +302,19 @@ cd /tmp || exit
 zip -q -r -P "$ZIP_PASSWORD" "$ZIP_TARGET" "$DIR_NAME"
 
 if [ -f "$ZIP_TARGET" ]; then
-    echo "[✓] 压缩包加密完成！密码为: $ZIP_PASSWORD"
-    echo "[✓] 最终调试结果文件路径: $ZIP_TARGET"
-    
     # 彻底安全地删除未打包的日志原始临时目录
     rm -rf "$LOG_DIR"
-    echo "[✓] 原始非压缩临时目录已被安全清理。"
+    
+    echo "========================================================="
+    echo "[✓] 调试日志捕捉与归档成功！"
+    echo "---------------------------------------------------------"
+    echo "[📍 Log 本地位置]: $ZIP_TARGET"
+    echo "---------------------------------------------------------"
+    echo "[📢 重要提示]: 请将上述 zip 压缩包通过网络或 U 盘"
+    echo "               回传给研发人员进行问题定位与故障深度分析。"
+    echo "========================================================="
 else
-    echo "[-] 错误: 打包压缩失败，请手动检查 $LOG_DIR"
+    echo "[-] 错误: 打包压缩失败，请手动检查系统 /tmp 空间及 $LOG_DIR"
     exit 1
 fi
 
