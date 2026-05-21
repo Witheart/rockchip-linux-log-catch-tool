@@ -41,7 +41,7 @@ done
 # ==========================================
 # 0. 工具链可用性检查
 # ==========================================
-REQUIRED_TOOLS=("i2ctransfer" "zip" "top" "iostat" "journalctl" "awk" "sed")
+REQUIRED_TOOLS=("i2ctransfer" "zip" "top" "iostat" "journalctl" "awk" "sed" "grep")
 MISSING_TOOLS=()
 
 for tool in "${REQUIRED_TOOLS[@]}"; do
@@ -53,7 +53,7 @@ done
 if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
     echo "[-] 警告: 发现缺失的必要工具: ${MISSING_TOOLS[*]}"
     if [ "$IGNORE_TOOLS" = true ]; then
-        echo "[!] 参数 --ignore 已启用，跳过工具检查，继续执行（部分指令可能失效）..."
+        echo "[!] 参数 --ignore 已启用，跳过工具检查，继续执行..."
     else
         echo "[-] 请先安装缺失的工具。例如: sudo apt-get update && sudo apt-get install i2c-tools zip sysstat"
         echo "[-] 或者附加 '-i' 或 '--ignore' 参数运行以忽略此错误。"
@@ -79,7 +79,6 @@ elif echo "$MODEL_INFO" | grep -iq "rk3588"; then
     CHIP_TYPE="RK3588"
     I2C_BUS="6"
 else
-    # 兜底通过核心数或其他特征探测，这里默认根据模型匹配
     echo "[!] 无法通过设备树准确识别 RK3568/RK3588，默认尝试使用 3568 规则(I2C-5)..."
     CHIP_TYPE="UNKNOWN"
     I2C_BUS="5"
@@ -88,7 +87,7 @@ fi
 echo "[*] 检测到芯片架构: $CHIP_TYPE (设备树: $MODEL_INFO)"
 
 # ==========================================
-# 2. 读取并转换 SN 逻辑
+# 2. 读取并转换 SN 逻辑 (修复解析问题)
 # ==========================================
 SN_STR=""
 echo "[*] 正在从 I2C-$I2C_BUS 读取硬件 SN..."
@@ -100,23 +99,30 @@ if [ -z "$RAW_HEX" ]; then
     echo "[!] 警告: 无法通过 I2C-$I2C_BUS 0x57 读取 SN，改用默认值 'UNKNOWN_SN'"
     SN_STR="UNKNOWN_SN"
 else
-    # 模拟前端 JS 的高效转换逻辑：清洗 0x、过滤 0xff、转换为 ASCII
+    # 稳健的字节级循环转换
     for hex in $RAW_HEX; do
+        # 确保去掉可能存在的 0x 前缀
         clean_hex=$(echo "$hex" | sed 's/^0x//i')
-        decimal=$((16#$clean_hex))
         
-        # 过滤 0xff (255) 和非打印或无效字符
-        if [ "$decimal" -ne 255 ] && [ "$decimal" -gt 31 ] && [ "$decimal" -lt 127 ]; then
-            # 将十进制转为 ASCII 字符
-            char=$(printf "\\$(printf '%03o' "$decimal")")
-            SN_STR="${SN_STR}${char}"
+        # 将16进制转换为10进制整数
+        if [[ "$clean_hex" =~ ^[0-9a-fA-F]+$ ]]; then
+            decimal=$((16#$clean_hex))
+            
+            # 过滤 0xff (255) 以及不可见控制字符 (ASCII 32-126 是合法可见字符)
+            if [ "$decimal" -ne 255 ] && [ "$decimal" -ge 32 ] && [ "$decimal" -le 126 ]; then
+                # 利用 printf 将十进制安全转为对应字符
+                char=$(printf "\\$(printf '%03o' "$decimal")")
+                SN_STR="${SN_STR}${char}"
+            fi
         fi
     done
 fi
 
-# 清洗可能导致目录名合规问题的空白字符
+# 移除首尾可能残余的空白，并做最终检查
 SN_STR=$(echo "$SN_STR" | tr -d '[:space:]')
-[ -z "$SN_STR" ] && SN_STR="EMPTY_SN"
+if [ -z "$SN_STR" ] || [ "$SN_STR" = "EMPTY_SN" ]; then
+    SN_STR="PARSE_ERR_SN"
+fi
 echo "[*] 解析后的物理 SN: $SN_STR"
 
 # ==========================================
@@ -130,80 +136,89 @@ mkdir -p "$LOG_DIR"
 echo "[*] 正在收集调试信息至临时目录: $LOG_DIR"
 
 # ==========================================
-# 🟢 第一层：OS 基础与环境层 (OS & Environment)
+# 🟢 第一层：OS 基础与环境层 (OS & Environment) -> 每份日志单独保存
 # ==========================================
 echo "[*] 正在收集：第一层 OS 基础与环境信息..."
-{
-    echo "=== 1. 内核版本 ==="; uname -a
-    echo -e "\n=== 2. 系统发行版 ==="; cat /etc/os-release 2>/dev/null
-    echo -e "\n=== 3. 根文件系统构建信息 ==="; cat /etc/buildinfo 2>/dev/null
-    echo -e "\n=== 4. 原始 I2C 硬件 SN 输出 ==="; echo "$RAW_HEX"
-    echo -e "\n=== 5. 磁盘空间 ==="; df -h
-    echo -e "\n=== 6. 分区挂载状态 ==="; mount
-    echo -e "\n=== 7. Machine ID ==="; cat /etc/machine-id 2>/dev/null
-    echo -e "\n=== 8. Dri Summary ==="; cat /sys/kernel/debug/dri/0/summary 2>/dev/null
-} > "$LOG_DIR/layer1_os_environment.txt"
+uname -a > "$LOG_DIR/layer1_uname.txt" 2>&1
+cat /etc/os-release > "$LOG_DIR/layer1_os_release.txt" 2>&1
+cat /etc/buildinfo > "$LOG_DIR/layer1_buildinfo.txt" 2>&1
+echo "$RAW_HEX" > "$LOG_DIR/layer1_raw_sn_hex.txt" 2>&1
+echo "$SN_STR" > "$LOG_DIR/layer1_parsed_sn_ascii.txt" 2>&1
+df -h > "$LOG_DIR/layer1_disk_usage.txt" 2>&1
+mount > "$LOG_DIR/layer1_mount_status.txt" 2>&1
+cat /etc/machine-id > "$LOG_DIR/layer1_machine_id.txt" 2>&1
+cat /sys/kernel/debug/dri/0/summary > "$LOG_DIR/layer1_dri_summary.txt" 2>&1
 
 # ==========================================
-# 🟡 第二层：Rockchip 独有硬件层
+# 🟡 第二层：Rockchip 独有硬件层 -> 每份日志单独保存
 # ==========================================
 echo "[*] 正在收集：第二层 瑞芯微硬件性能指标..."
-{
-    echo "=== 1. CPU 各核实时频率 ==="
-    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
-        if [ -f "$cpu" ]; then echo "$cpu: $(cat "$cpu")"; fi
-    done
-    
-    echo -e "\n=== 2. 各热敏点温度 (thermal_zone) ==="
-    for zone in /sys/class/thermal/thermal_zone*/temp; do
-        if [ -f "$zone" ]; then echo "$zone: $(cat "$zone")"; fi
-    done
 
-    echo -e "\n=== 3. GPU 频率 ==="
-    cat /sys/class/devfreq/*gpu/cur_freq 2>/dev/null || echo "GPU node not found"
-    
-    echo -e "\n=== 4. DDR 频率 ==="
-    cat /sys/class/devfreq/dmc/cur_freq 2>/dev/null || echo "DDR node not found"
-    
-    echo -e "\n=== 5. NPU 负载 ==="
-    if [ -d "/sys/kernel/debug/rknpu" ]; then
-        cat /sys/kernel/debug/rknpu/load 2>/dev/null
+# CPU 各核频率单独保存
+> "$LOG_DIR/layer2_cpu_freq.txt"
+for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
+    if [ -f "$cpu" ]; then echo "$cpu: $(cat "$cpu")" >> "$LOG_DIR/layer2_cpu_freq.txt"; fi
+done
+
+# 温度单独保存
+> "$LOG_DIR/layer2_thermal_zone.txt"
+for zone in /sys/class/thermal/thermal_zone*/temp; do
+    if [ -f "$zone" ]; then echo "$zone: $(cat "$zone")" >> "$LOG_DIR/layer2_thermal_zone.txt"; fi
+done
+
+# GPU频率单独保存
+cat /sys/class/devfreq/*gpu/cur_freq > "$LOG_DIR/layer2_gpu_freq.txt" 2>&1
+
+# DDR 频率单独保存 (针对 RK3588 与 RK3568 做策略兼容切换)
+if [ -f /sys/class/devfreq/dmc/cur_freq ]; then
+    cat /sys/class/devfreq/dmc/cur_freq > "$LOG_DIR/layer2_ddr_freq.txt" 2>&1
+else
+    # 3568 或者部分特殊固件上尝试使用时钟树抓取 DDR
+    if [ -f /sys/kernel/debug/clk/clk_summary ]; then
+        cat /sys/kernel/debug/clk/clk_summary | grep -i ddr > "$LOG_DIR/layer2_ddr_freq.txt" 2>&1
     else
-        echo "NPU debugfs node closed."
+        echo "DDR node and clk_summary not found" > "$LOG_DIR/layer2_ddr_freq.txt"
     fi
-} > "$LOG_DIR/layer2_rk_hardware.txt"
+fi
+
+# NPU 负载单独保存
+if [ -d "/sys/kernel/debug/rknpu" ]; then
+    cat /sys/kernel/debug/rknpu/load > "$LOG_DIR/layer2_rknpu_load.txt" 2>&1
+else
+    echo "NPU debugfs node closed." > "$LOG_DIR/layer2_rknpu_load.txt"
+fi
 
 # ==========================================
-# 🟠 第三层：内核与底层总线层 (Kernel & Bus)
+# 🟠 第三层：内核与底层总线层 (Kernel & Bus) -> 每份日志单独保存
 # ==========================================
 echo "[*] 正在收集：第三层 内核与底层总线日志..."
-dmesg -T > "$LOG_DIR/layer3_dmesg.log"
-{
-    echo "=== 1. PCIe 设备列表 ==="; lspci 2>/dev/null || echo "lspci failed"
-    echo -e "\n=== 2. USB 设备列表 ==="; lsusb 2>/dev/null || echo "lsusb failed"
-    echo -e "\n=== 3. 系统中断分配及触发频率 ==="; cat /proc/interrupts
-} > "$LOG_DIR/layer3_bus_interrupts.txt"
+dmesg -T > "$LOG_DIR/layer3_dmesg.log" 2>&1
+lspci -v > "$LOG_DIR/layer3_lspci.txt" 2>&1 || lspci > "$LOG_DIR/layer3_lspci.txt" 2>&1
+lsusb > "$LOG_DIR/layer3_lsusb.txt" 2>&1
+cat /proc/interrupts > "$LOG_DIR/layer3_interrupts.txt" 2>&1
 
 # ==========================================
-# 🔵 第四层：系统资源与网络层 (Resources & Network)
+# 🔵 第四层：系统资源与网络层 (Resources & Network) -> 每份日志单独保存
 # ==========================================
 echo "[*] 正在收集：第四层 系统资源与IO网络堆栈..."
-{
-    echo "=== 1. 整体内存 free ==="; free -m
-    echo -e "\n=== 2. 详细内存 meminfo ==="; cat /proc/meminfo
-    echo -e "\n=== 3. CMA 连续内存分配 ==="; cat /proc/meminfo | grep -i cma
-    echo -e "\n=== 4. 全局打开文件句柄总数 ==="; cat /proc/sys/fs/file-nr
-    echo -e "\n=== 5. 网络接口与 IP ==="; ip a
-    echo -e "\n=== 6. 路由表 ==="; ip route
-    echo -e "\n=== 7. 网络连接状态与端口占用 ==="
-    if command -v ss &> /dev/null; then ss -antp; else netstat -anp; fi
-} > "$LOG_DIR/layer4_resources_network.txt"
+free -m > "$LOG_DIR/layer4_free_m.txt" 2>&1
+cat /proc/meminfo > "$LOG_DIR/layer4_meminfo.txt" 2>&1
+cat /proc/meminfo | grep -i cma > "$LOG_DIR/layer4_cma_info.txt" 2>&1
+cat /proc/sys/fs/file-nr > "$LOG_DIR/layer4_file_handles.txt" 2>&1
+ip a > "$LOG_DIR/layer4_ip_address.txt" 2>&1
+ip route > "$LOG_DIR/layer4_ip_route.txt" 2>&1
+
+if command -v ss &> /dev/null; then 
+    ss -antp > "$LOG_DIR/layer4_network_connections.txt" 2>&1
+else 
+    netstat -anp > "$LOG_DIR/layer4_network_connections.txt" 2>&1
+fi
 
 # 抓取进程快照快照 (兼容标准 Linux 与 BusyBox)
 if top -h 2>&1 | grep -q "BusyBox"; then
-    top -n 1 > "$LOG_DIR/layer4_process_snapshot.txt"
+    top -n 1 > "$LOG_DIR/layer4_top_processes.txt" 2>&1
 else
-    top -b -n 1 > "$LOG_DIR/layer4_process_snapshot.txt"
+    top -b -n 1 > "$LOG_DIR/layer4_top_processes.txt" 2>&1
 fi
 
 # 抓取 Iostat 扩展指标
@@ -254,7 +269,7 @@ zip -q -r -P "$ZIP_PASSWORD" "$ZIP_TARGET" "$DIR_NAME"
 
 if [ -f "$ZIP_TARGET" ]; then
     echo "[✓] 压缩包加密完成！密码为: $ZIP_PASSWORD"
-    echo "[✓] 最终调试结果件路径: $ZIP_TARGET"
+    echo "[✓] 最终调试结果文件路径: $ZIP_TARGET"
     
     # 彻底安全地删除未打包的日志原始临时目录
     rm -rf "$LOG_DIR"
