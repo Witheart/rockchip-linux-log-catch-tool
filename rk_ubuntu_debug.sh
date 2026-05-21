@@ -9,14 +9,50 @@
 # 严格模式：遇到未定义变量报错
 set -u
 
+# ==========================================
+# 权限前置强校验 (强制要求使用 sudo)
+# ==========================================
+if [ "$EUID" -ne 0 ]; then
+    echo "========================================================="
+    echo "[-] 拒绝执行: 权限不足！"
+    echo "[-] 核心硬件节点（如I2C、DDR时钟树、内核日志）必须要求 root 权限。"
+    echo "[-] 请使用sudo重新执行脚本:"
+    echo "========================================================="
+    exit 1
+fi
+
 # 初始化默认参数
 IGNORE_TOOLS=false
 JOURNAL_BOOTS=10
 ZIP_PASSWORD="Pi3.14159"
 
+# 帮助菜单函数
+show_help() {
+    echo "======================================================================"
+    echo "  RK3568/3588 Ubuntu 一键调试日志捕捉工具 - 帮助手册"
+    echo "======================================================================"
+    echo "使用方法:"
+    echo "  sudo $0 [参数]"
+    echo ""
+    echo "有效参数列表:"
+    echo "  -h, --help        显示当前帮助说明菜单"
+    echo "  -i, --ignore      忽略工具链缺失检查，强制越过报错执行"
+    echo "  -j [数字]         指定要抓取的历史开机(boot)日志数量 (默认: 10 次)"
+    echo ""
+    echo "使用示例:"
+    echo "  示例 1 (标准一键抓取) : sudo $0"
+    echo "  示例 2 (抓取最近5次开机): sudo $0 -j 5"
+    echo "  示例 3 (无网环境强行运行): sudo $0 -i"
+    echo "======================================================================"
+}
+
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
         -i|--ignore)
             IGNORE_TOOLS=true
             shift
@@ -32,7 +68,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "[-] 未知参数: $1"
-            echo "使用方法: $0 [-i|--ignore] [-j 抓取开机日志数量]"
+            echo "提示: 可使用 '$0 -h' 或 '$0 --help' 查看可用参数列表。"
             exit 1
             ;;
     esac
@@ -92,7 +128,8 @@ fi
 # ==========================================
 MODEL_INFO=""
 if [ -f /sys/firmware/devicetree/base/model ]; then
-    MODEL_INFO=$(cat /sys/firmware/devicetree/base/model 2>/dev/null)
+    # 使用 tr -d '\0' 彻底滤除设备树节点末尾自带的 Null 字节，消除 Bash 警告
+    MODEL_INFO=$(cat /sys/firmware/devicetree/base/model 2>/dev/null | tr -d '\0')
 fi
 
 CHIP_TYPE=""
@@ -295,7 +332,7 @@ done
 # 6. 加密压缩与彻底清理 (带Log路径和回传研发提示)
 # ==========================================
 ZIP_TARGET="/tmp/${DIR_NAME}.zip"
-echo "[*] 数据采集完毕，开始进行密码加密打包..."
+echo "[*] 数据采集完毕，开始进行压缩打包..."
 
 # 进入 /tmp 目录进行压缩，避免将绝对路径打入压缩包
 cd /tmp || exit
