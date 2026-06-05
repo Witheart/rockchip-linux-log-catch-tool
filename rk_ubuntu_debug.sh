@@ -3,7 +3,7 @@
 # 脚本名称: rk_ubuntu_debug.sh
 # 描述: Ubuntu debug 系统信息及日志捕捉脚本 (针对 RK3568/RK3588 系列)
 # 作者: 吴思含（Witheart）
-# 更新时间: 20260521
+# 更新时间: 20260521 (已增加日志交互选择与空日志检测功能)
 # ==============================================================================
 
 # 严格模式：遇到未定义变量报错
@@ -24,6 +24,7 @@ fi
 # 初始化默认参数
 IGNORE_TOOLS=false
 JOURNAL_BOOTS=10
+J_PROVIDED=false # 用于标记用户是否在命令行传入了 -j 参数
 ZIP_PASSWORD="Pi3.14159"
 
 # 帮助菜单函数
@@ -60,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         -j)
             if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
                 JOURNAL_BOOTS=$2
+                J_PROVIDED=true
                 shift 2
             else
                 echo "[-] 错误: -j 参数后需要指定数字"
@@ -128,7 +130,6 @@ fi
 # ==========================================
 MODEL_INFO=""
 if [ -f /sys/firmware/devicetree/base/model ]; then
-    # 使用 tr -d '\0' 彻底滤除设备树节点末尾自带的 Null 字节，消除 Bash 警告
     MODEL_INFO=$(cat /sys/firmware/devicetree/base/model 2>/dev/null | tr -d '\0')
 fi
 
@@ -155,30 +156,20 @@ echo "[*] 检测到芯片架构: $CHIP_TYPE (设备树: $MODEL_INFO)"
 SN_STR=""
 echo "[*] 正在从 I2C-$I2C_BUS 读取硬件 SN..."
 
-# 执行 i2ctransfer 读取并捕获原始十六进制输出
 RAW_HEX=$(i2ctransfer -y -f "$I2C_BUS" w2@0x57 0x10 0x00 r30 2>/dev/null || echo "")
 
 if [ -z "$RAW_HEX" ]; then
     echo "[!] 警告: 无法通过 I2C-$I2C_BUS 0x57 读取 SN，改用默认值 'UNKNOWN_SN'"
     SN_STR="UNKNOWN_SN"
 else
-    # 稳健的字节级循环转换
     for hex in $RAW_HEX; do
-        # 确保去掉可能存在的 0x 前缀
         clean_hex=$(echo "$hex" | sed 's/^0x//i')
-        
-        # 将16进制转换为10进制整数
         if [[ "$clean_hex" =~ ^[0-9a-fA-F]+$ ]]; then
             decimal=$((16#$clean_hex))
-            
-            # 核心修正：如果检测到 0x00 (\0 字符串结束符)，立刻终止后续解析
             if [ "$decimal" -eq 0 ]; then
                 break
             fi
-            
-            # 过滤 0xff (255) 以及不可见控制字符 (ASCII 32-126 是合法可见字符)
             if [ "$decimal" -ne 255 ] && [ "$decimal" -ge 32 ] && [ "$decimal" -le 126 ]; then
-                # 利用 printf 将十进制安全转为对应字符
                 char=$(printf "\\$(printf '%03o' "$decimal")")
                 SN_STR="${SN_STR}${char}"
             fi
@@ -186,7 +177,6 @@ else
     done
 fi
 
-# 移除首尾可能残余的空白，并做最终检查
 SN_STR=$(echo "$SN_STR" | tr -d '[:space:]')
 if [ -z "$SN_STR" ] || [ "$SN_STR" = "EMPTY_SN" ]; then
     SN_STR="PARSE_ERR_SN"
@@ -204,7 +194,7 @@ mkdir -p "$LOG_DIR"
 echo "[*] 正在收集调试信息至临时目录: $LOG_DIR"
 
 # ==========================================
-# 🟢 第一层：OS 基础与环境层 (OS & Environment) -> 每份日志单独保存
+# 🟢 第一层：OS 基础与环境层 (OS & Environment)
 # ==========================================
 echo "[*] 正在收集：第一层 OS 基础与环境信息..."
 uname -a > "$LOG_DIR/layer1_uname.txt" 2>&1
@@ -216,35 +206,28 @@ df -h > "$LOG_DIR/layer1_disk_usage.txt" 2>&1
 mount > "$LOG_DIR/layer1_mount_status.txt" 2>&1
 cat /etc/machine-id > "$LOG_DIR/layer1_machine_id.txt" 2>&1
 cat /sys/kernel/debug/dri/0/summary > "$LOG_DIR/layer1_dri_summary.txt" 2>&1
-
-# 抓取 X11/Wayland 屏幕显示架构状态 (如在无图形界面下运行，会捕获错误信息作为参考)
 xrandr --verbose > "$LOG_DIR/layer1_xrandr_display.txt" 2>&1
 
 # ==========================================
-# 🟡 第二层：Rockchip 独有硬件层 -> 每份日志单独保存
+# 🟡 第二层：Rockchip 独有硬件层
 # ==========================================
 echo "[*] 正在收集：第二层 瑞芯微硬件性能指标..."
 
-# CPU 各核频率单独保存
 > "$LOG_DIR/layer2_cpu_freq.txt"
 for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
     if [ -f "$cpu" ]; then echo "$cpu: $(cat "$cpu")" >> "$LOG_DIR/layer2_cpu_freq.txt"; fi
 done
 
-# 温度单独保存
 > "$LOG_DIR/layer2_thermal_zone.txt"
 for zone in /sys/class/thermal/thermal_zone*/temp; do
     if [ -f "$zone" ]; then echo "$zone: $(cat "$zone")" >> "$LOG_DIR/layer2_thermal_zone.txt"; fi
 done
 
-# GPU频率单独保存
 cat /sys/class/devfreq/*gpu/cur_freq > "$LOG_DIR/layer2_gpu_freq.txt" 2>&1
 
-# DDR 频率单独保存 (针对 RK3588 与 RK3568 做策略兼容切换)
 if [ -f /sys/class/devfreq/dmc/cur_freq ]; then
     cat /sys/class/devfreq/dmc/cur_freq > "$LOG_DIR/layer2_ddr_freq.txt" 2>&1
 else
-    # 3568 或者部分特殊固件上尝试使用时钟树抓取 DDR
     if [ -f /sys/kernel/debug/clk/clk_summary ]; then
         cat /sys/kernel/debug/clk/clk_summary | grep -i ddr > "$LOG_DIR/layer2_ddr_freq.txt" 2>&1
     else
@@ -252,7 +235,6 @@ else
     fi
 fi
 
-# NPU 负载单独保存
 if [ -d "/sys/kernel/debug/rknpu" ]; then
     cat /sys/kernel/debug/rknpu/load > "$LOG_DIR/layer2_rknpu_load.txt" 2>&1
 else
@@ -260,7 +242,7 @@ else
 fi
 
 # ==========================================
-# 🟠 第三层：内核与底层总线层 (Kernel & Bus) -> 每份日志单独保存
+# 🟠 第三层：内核与底层总线层 (Kernel & Bus)
 # ==========================================
 echo "[*] 正在收集：第三层 内核与底层总线日志..."
 dmesg -T > "$LOG_DIR/layer3_dmesg.log" 2>&1
@@ -269,7 +251,7 @@ lsusb > "$LOG_DIR/layer3_lsusb.txt" 2>&1
 cat /proc/interrupts > "$LOG_DIR/layer3_interrupts.txt" 2>&1
 
 # ==========================================
-# 🔵 第四层：系统资源与网络层 (Resources & Network) -> 每份日志单独保存
+# 🔵 第四层：系统资源与网络层 (Resources & Network)
 # ==========================================
 echo "[*] 正在收集：第四层 系统资源与IO网络堆栈..."
 free -m > "$LOG_DIR/layer4_free_m.txt" 2>&1
@@ -285,19 +267,18 @@ else
     netstat -anp > "$LOG_DIR/layer4_network_connections.txt" 2>&1
 fi
 
-# 抓取进程快照快照 (兼容标准 Linux 与 BusyBox)
 if top -h 2>&1 | grep -q "BusyBox"; then
     top -n 1 > "$LOG_DIR/layer4_top_processes.txt" 2>&1
 else
     top -b -n 1 > "$LOG_DIR/layer4_top_processes.txt" 2>&1
 fi
 
-# 抓取 Iostat 扩展指标
 iostat -x 1 2 > "$LOG_DIR/layer4_iostat.txt" 2>/dev/null
 
 # ==========================================
 # 🔴 第五层：业务与应用层 (Journalctl 深度抓取)
 # ==========================================
+echo "---------------------------------------------------------"
 echo "[*] 正在收集：第五层 Journalctl 级联开机日志..."
 JOURNAL_DIR="$LOG_DIR/journalctl"
 mkdir -p "$JOURNAL_DIR"
@@ -307,13 +288,29 @@ journalctl --list-boots > "$JOURNAL_DIR/boot_list.txt" 2>/dev/null
 
 # 自动解析获取实际最大可用 Boots 数量
 AVAILABLE_BOOTS=$(journalctl --list-boots 2>/dev/null | wc -l)
-echo "[*] 系统当前存储了 $AVAILABLE_BOOTS 个开机周期，计划抓取最大数量: $JOURNAL_BOOTS"
+echo "[i] 检测到系统当前共存储了 $AVAILABLE_BOOTS 次历史开机日志。"
+
+# 如果用户没有在启动命令中提供 -j 参数，则提示用户输入
+if [ "$J_PROVIDED" = false ]; then
+    read -p "[?] 请输入需要抓取的最近日志次数 (直接回车默认抓取 10 次): " INPUT_BOOTS
+    if [[ -n "$INPUT_BOOTS" && "$INPUT_BOOTS" =~ ^[0-9]+$ ]]; then
+        JOURNAL_BOOTS=$INPUT_BOOTS
+    elif [[ -n "$INPUT_BOOTS" ]]; then
+        echo "[!] 输入无效，将使用默认值: 10"
+        JOURNAL_BOOTS=10
+    fi
+fi
 
 # 确定本次循环最终需要抓取的条数
 LOOP_LIMIT=$JOURNAL_BOOTS
 if [ "$AVAILABLE_BOOTS" -lt "$JOURNAL_BOOTS" ]; then
     LOOP_LIMIT=$AVAILABLE_BOOTS
+    echo "[!] 请求抓取次数($JOURNAL_BOOTS)大于系统存储总数($AVAILABLE_BOOTS)，将抓取全部 $LOOP_LIMIT 次日志。"
+else
+    echo "[*] 计划抓取最近的 $LOOP_LIMIT 次日志。"
 fi
+
+EMPTY_LOGS_WARNING=""
 
 # 从最新的一次(0)向前滚，抓取最近的 N 次日志并带有清晰序号标志
 for (( i=0; i<LOOP_LIMIT; i++ )); do
@@ -325,8 +322,23 @@ for (( i=0; i<LOOP_LIMIT; i++ )); do
     [ -z "$BOOT_TIME" ] && BOOT_TIME="unknown_time"
 
     echo "    -> 正在抓取启动次序: $BOOT_OFFSET ($BOOT_TIME)"
-    journalctl -b "$BOOT_OFFSET" --no-pager > "$JOURNAL_DIR/boot_${BOOT_OFFSET}_${BOOT_TIME}.log" 2>/dev/null
+    
+    LOG_FILE="$JOURNAL_DIR/boot_${BOOT_OFFSET}_${BOOT_TIME}.log"
+    journalctl -b "$BOOT_OFFSET" --no-pager > "$LOG_FILE" 2>/dev/null
+
+    # 【新增检查逻辑】检测抓取出来的日志文件是否为空
+    if [ ! -s "$LOG_FILE" ]; then
+        echo "       [!] 异常提醒: 该启动次序的系统日志内容为空！"
+        EMPTY_LOGS_WARNING="${EMPTY_LOGS_WARNING}\n       - 偏移 $BOOT_OFFSET (时间: $BOOT_TIME)"
+    fi
 done
+
+# 如果有空日志，单独进行高亮警告输出
+if [ -n "$EMPTY_LOGS_WARNING" ]; then
+    echo "---------------------------------------------------------"
+    echo -e "[!] 警告: 捕捉到部分 journalctl 日志为空，系统日志服务可能工作异常或被清空:${EMPTY_LOGS_WARNING}"
+    echo "---------------------------------------------------------"
+fi
 
 # ==========================================
 # 6. 加密压缩与彻底清理 (带Log路径和回传研发提示)
