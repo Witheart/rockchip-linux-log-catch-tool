@@ -372,6 +372,15 @@ fi
 
 iostat -x 1 2 > "$LOG_DIR/layer4_iostat.txt" 2>/dev/null
 
+# --- D 状态（不可中断睡眠）进程检测 ---
+{
+    echo "===== D 状态进程 (精简视图: pid,stat,wchan,comm) ====="
+    ps -eo pid,stat,wchan:32,comm | awk 'NR==1 || $2 ~ /^D/ {print $0}'
+    echo ""
+    echo "===== D 状态进程 (完整视图: ps aux) ====="
+    ps aux | awk 'NR==1 || $8 ~ /D/ {print $0}'
+} > "$LOG_DIR/layer4_d_state_processes.txt" 2>&1
+
 # ==========================================
 # 🔴 第五层：业务与应用层 (Journalctl 深度抓取)
 # ==========================================
