@@ -230,6 +230,67 @@ cat /etc/machine-id > "$LOG_DIR/layer1_machine_id.txt" 2>&1
 cat /sys/kernel/debug/dri/0/summary > "$LOG_DIR/layer1_dri_summary.txt" 2>&1
 xrandr --verbose > "$LOG_DIR/layer1_xrandr_display.txt" 2>&1
 
+# --- 显示环境检测（显示管理器 / 协议 / 桌面环境）---
+echo "[*] 正在收集：显示环境信息（DM / 协议 / DE）..."
+{
+    echo "===== 显示管理器 (Display Manager) ====="
+    # 尝试通过 systemd 查找正在运行的 DM 服务
+    for dm in lightdm gdm3 sddm lxdm xdm slim; do
+        if systemctl is-active --quiet "$dm" 2>/dev/null; then
+            echo "[systemd] 活跃的显示管理器: $dm"
+        fi
+    done
+    # 通过进程列表查漏
+    ps -eo comm= 2>/dev/null | grep -iE 'lightdm|gdm|sddm|lxdm|xdm|slim' | sort -u | while read -r p; do
+        echo "[ps] 检测到显示管理器进程: $p"
+    done
+
+    echo ""
+    echo "===== 显示协议 (Display Protocol) ====="
+    # XDG_SESSION_TYPE 是 systemd/logind 记录的当前会话类型
+    echo "[env] \$XDG_SESSION_TYPE  = ${XDG_SESSION_TYPE:-未设置}"
+    # Wayland 特征检测
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        echo "[env] \$WAYLAND_DISPLAY   = $WAYLAND_DISPLAY (Wayland 活跃)"
+    else
+        echo "[env] \$WAYLAND_DISPLAY   = 未设置"
+    fi
+    # X11 特征检测
+    if [ -n "${DISPLAY:-}" ]; then
+        echo "[env] \$DISPLAY           = $DISPLAY (X11 活跃)"
+    else
+        echo "[env] \$DISPLAY           = 未设置"
+    fi
+    # loginctl 提供更可靠的会话信息
+    if command -v loginctl &>/dev/null; then
+        ACTIVE_SESSIONS=$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}')
+        for sid in $ACTIVE_SESSIONS; do
+            echo "--- loginctl session $sid ---"
+            loginctl show-session "$sid" 2>/dev/null | grep -iE 'Type|Display|Desktop|Remote'
+        done
+    fi
+
+    echo ""
+    echo "===== 桌面环境 (Desktop Environment) ====="
+    echo "[env] \$XDG_CURRENT_DESKTOP = ${XDG_CURRENT_DESKTOP:-未设置}"
+    echo "[env] \$DESKTOP_SESSION     = ${DESKTOP_SESSION:-未设置}"
+    echo "[env] \$GDMSESSION          = ${GDMSESSION:-未设置}"
+    echo "[env] \$XDG_SESSION_DESKTOP = ${XDG_SESSION_DESKTOP:-未设置}"
+    # 进程检测（gnome/kde/xfce/lxde 等典型 DE 组件）
+    ps -eo comm= 2>/dev/null | grep -iE 'gnome-shell|plasmashell|xfdesktop|xfwm4|lxpanel|mate-panel|cinnamon|budgie-wm|sway|hyprland|i3' | sort -u | while read -r p; do
+        echo "[ps] 检测到桌面环境组件: $p"
+    done
+
+    echo ""
+    echo "===== 会话来源说明 (SSH / 本地) ====="
+    if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_CLIENT:-}" ]; then
+        echo "[!] 当前为 SSH 远程会话，上述环境变量可能反映的是 SSH 会话而非本地桌面环境！"
+        echo "[!] 建议同时查看 loginctl 输出或直接到设备桌面终端运行本脚本以获取准确信息。"
+    else
+        echo "[*] 当前非 SSH 会话，环境变量应能反映本地桌面环境。"
+    fi
+} > "$LOG_DIR/layer1_display_env.txt" 2>&1
+
 # ==========================================
 # 🟡 第二层：Rockchip 独有硬件层
 # ==========================================
