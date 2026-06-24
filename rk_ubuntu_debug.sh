@@ -344,6 +344,20 @@ cat /proc/sys/fs/file-nr > "$LOG_DIR/layer4_file_handles.txt" 2>&1
 ip a > "$LOG_DIR/layer4_ip_address.txt" 2>&1
 ip route > "$LOG_DIR/layer4_ip_route.txt" 2>&1
 
+# 无线网卡信息
+if command -v iwconfig &>/dev/null; then
+    iwconfig > "$LOG_DIR/layer4_iwconfig.txt" 2>&1
+else
+    echo "[!] iwconfig 未安装 (需 wireless-tools 包)" > "$LOG_DIR/layer4_iwconfig.txt"
+fi
+
+# 传统网络接口信息
+if command -v ifconfig &>/dev/null; then
+    ifconfig -a > "$LOG_DIR/layer4_ifconfig.txt" 2>&1
+else
+    echo "[!] ifconfig 未安装 (需 net-tools 包)" > "$LOG_DIR/layer4_ifconfig.txt"
+fi
+
 if command -v ss &> /dev/null; then 
     ss -antp > "$LOG_DIR/layer4_network_connections.txt" 2>&1
 else 
