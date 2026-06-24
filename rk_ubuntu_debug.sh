@@ -3,7 +3,7 @@
 # 脚本名称: rk_ubuntu_debug.sh
 # 描述: Ubuntu debug 系统信息及日志捕捉脚本 (针对 RK3568/RK3588 系列)
 # 作者: 吴思含（Witheart）
-# 更新时间: 20260521 (已增加日志交互选择与空日志检测功能)
+# 更新时间: 20260624 (新增双模式/显示环境/D状态检测/sysrq-trigger/完整性校验)
 # ==============================================================================
 
 # 严格模式：遇到未定义变量报错
@@ -38,6 +38,14 @@ show_help() {
     echo "  示例 2 (抓取最近5次开机): sudo $0 -j 5"
     echo "  示例 3 (无网环境强行运行): sudo $0 -i"
     echo "  示例 4 (普通用户模式): $0 -m nosudo"
+    echo ""
+    echo "主要采集内容:"
+    echo "  Layer1 - OS 基础: uname, os-release, 磁盘, 显示环境(DM/协议/DE)"
+    echo "  Layer2 - 瑞芯微硬件: CPU/DDR/GPU/NPU 频率, 温度"
+    echo "  Layer3 - 内核总线: dmesg, lspci, lsusb, 中断 + sysrq-trigger 内核转储"
+    echo "  Layer4 - 系统资源: 内存, 网络(ip/iwconfig/ifconfig/ss), D状态进程检测"
+    echo "  Layer5 - 应用日志: journalctl 多启动历史日志"
+    echo "  Layer6 - 完整性校验: 自动检查所有日志文件可读且非空"
     echo "======================================================================"
 }
 
@@ -145,6 +153,31 @@ if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
         echo "[-] 提示: 你也可以追加 '-i' 或 '--ignore' 参数直接跳过环境检查。"
         exit 1
     fi
+fi
+
+# --- 推荐工具检查（非强制，缺失仅提示）---
+RECOMMENDED_TOOLS=("iwconfig" "ifconfig")
+declare -A REC_PKG_MAP
+REC_PKG_MAP[iwconfig]="wireless-tools"
+REC_PKG_MAP[ifconfig]="net-tools"
+MISSING_REC=()
+
+for tool in "${RECOMMENDED_TOOLS[@]}"; do
+    if ! command -v "$tool" &> /dev/null; then
+        MISSING_REC+=("$tool")
+    fi
+done
+
+if [ ${#MISSING_REC[@]} -ne 0 ]; then
+    NEED_REC_PKGS=""
+    for r_tool in "${MISSING_REC[@]}"; do
+        r_pkg=${REC_PKG_MAP[$r_tool]}
+        if [[ ! "$NEED_REC_PKGS" =~ "$r_pkg" ]]; then
+            NEED_REC_PKGS="$NEED_REC_PKGS $r_pkg"
+        fi
+    done
+    echo "[!] 提示: 以下推荐工具未安装，将跳过对应采集: ${MISSING_REC[*]}"
+    echo "    可通过以下命令安装: sudo apt-get install -y$NEED_REC_PKGS"
 fi
 
 # ==========================================
