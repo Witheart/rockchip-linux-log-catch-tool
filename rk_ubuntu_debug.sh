@@ -447,6 +447,56 @@ if [ -n "$EMPTY_LOGS_WARNING" ]; then
 fi
 
 # ==========================================
+# 🔴 第五层附加：sysrq-trigger 内核转储 (D状态任务 + 全部任务)
+# 说明：先触发内核 dump，再重新抓取 dmesg 和本次启动的 journalctl，
+#       以便捕获内核写入的 D 状态任务堆栈等关键信息。
+# ==========================================
+SYSRQ_TRIGGER="/proc/sysrq-trigger"
+if [ "$RUN_MODE" = "sudo" ]; then
+    if [ -w "$SYSRQ_TRIGGER" ]; then
+        echo "[*] 正在触发 sysrq-trigger：导出 D 状态任务 (w) 和全部任务 (t) ..."
+        
+        # 先确认 sysrq 功能已启用
+        if [ -f /proc/sys/kernel/sysrq ]; then
+            SYSRQ_VAL=$(cat /proc/sys/kernel/sysrq)
+            if [ "$SYSRQ_VAL" = "0" ]; then
+                echo "[!] /proc/sys/kernel/sysrq=0，尝试临时启用..."
+                echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+            fi
+        fi
+        
+        # 导出 D 状态任务
+        echo w > "$SYSRQ_TRIGGER" 2>/dev/null && \
+            echo "    [✓] sysrq w 已触发（D 状态任务已写入内核日志）" || \
+            echo "    [!] sysrq w 触发失败"
+        
+        # 导出全部任务状态（信息量较大）
+        echo t > "$SYSRQ_TRIGGER" 2>/dev/null && \
+            echo "    [✓] sysrq t 已触发（全部任务状态已写入内核日志）" || \
+            echo "    [!] sysrq t 触发失败"
+        
+        # 恢复 sysrq 原始值
+        if [ -n "${SYSRQ_VAL:-}" ]; then
+            echo "$SYSRQ_VAL" > /proc/sys/kernel/sysrq 2>/dev/null || true
+        fi
+        
+        # 重新抓取 dmesg（包含 sysrq 导出的内核信息）
+        echo "[*] 正在重新抓取 dmesg（含 sysrq 输出）..."
+        dmesg -T > "$LOG_DIR/layer3_dmesg_after_sysrq.log" 2>&1
+        
+        # 重新抓取本次启动的 journalctl（sysrq 输出也可能记录在此）
+        echo "[*] 正在重新抓取本次启动的 journalctl（含 sysrq 输出）..."
+        journalctl -b 0 --no-pager > "$JOURNAL_DIR/boot_0_after_sysrq.log" 2>/dev/null
+        
+    else
+        echo "[!] $SYSRQ_TRIGGER 不可写，跳过 sysrq-trigger 内核转储。"
+    fi
+else
+    echo "[!] nosudo 模式下无法写入 $SYSRQ_TRIGGER，跳过 sysrq-trigger 内核转储。"
+    echo "[!] 如需导出 D 状态任务堆栈，请使用 sudo 模式运行本脚本（注意：可能因 D 进程卡住）。"
+fi
+
+# ==========================================
 # 6. 加密压缩与彻底清理 (带Log路径和回传研发提示)
 # ==========================================
 ZIP_TARGET="/tmp/${DIR_NAME}.zip"
