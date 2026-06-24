@@ -497,6 +497,38 @@ else
 fi
 
 # ==========================================
+# 5.5 日志文件完整性校验（非空 + 可读检查）
+# ==========================================
+echo "[*] 正在进行日志文件完整性校验..."
+VALIDATE_FAIL_COUNT=0
+VALIDATE_TOTAL=0
+while IFS= read -r -d '' f; do
+    VALIDATE_TOTAL=$((VALIDATE_TOTAL + 1))
+    ISSUES=""
+    # 检查可读
+    if [ ! -r "$f" ]; then
+        ISSUES="${ISSUES}[不可读]"
+    fi
+    # 检查非空
+    if [ ! -s "$f" ]; then
+        ISSUES="${ISSUES}[空文件]"
+    fi
+    if [ -n "$ISSUES" ]; then
+        echo "    [!] $ISSUES $(basename "$f")"
+        VALIDATE_FAIL_COUNT=$((VALIDATE_FAIL_COUNT + 1))
+    fi
+done < <(find "$LOG_DIR" -type f -print0 2>/dev/null)
+
+if [ "$VALIDATE_FAIL_COUNT" -gt 0 ]; then
+    echo "---------------------------------------------------------"
+    echo "[!] 校验结果: $VALIDATE_FAIL_COUNT / $VALIDATE_TOTAL 个日志文件存在问题（详见上方警告）。"
+    echo "[!] 可能原因: 权限不足(nosudo模式) / 命令未安装 / 系统节点不存在。"
+    echo "---------------------------------------------------------"
+else
+    echo "    [✓] 全部 $VALIDATE_TOTAL 个日志文件校验通过（非空且可读）。"
+fi
+
+# ==========================================
 # 6. 加密压缩与彻底清理 (带Log路径和回传研发提示)
 # ==========================================
 ZIP_TARGET="/tmp/${DIR_NAME}.zip"
