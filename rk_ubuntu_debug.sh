@@ -3,7 +3,7 @@
 # 脚本名称: rk_ubuntu_debug.sh
 # 描述: Ubuntu debug 系统信息及日志捕捉脚本 (针对 RK3568/RK3588 系列)
 # 作者: 吴思含（Witheart）
-# 更新时间: 20260624 (新增双模式/显示环境/D状态检测/sysrq-trigger/完整性校验)
+# 更新时间: 20260625 (新增 todesk 日志抓取/双模式/显示环境/D状态检测/sysrq-trigger/完整性校验)
 # ==============================================================================
 
 # 严格模式：遇到未定义变量报错
@@ -43,7 +43,7 @@ show_help() {
     echo "  Layer1 - OS 基础: uname, os-release, 磁盘, 显示环境(DM/协议/DE)"
     echo "  Layer2 - 瑞芯微硬件: CPU/DDR/GPU/NPU 频率, 温度"
     echo "  Layer3 - 内核总线: dmesg, lspci, lsusb, 中断 + sysrq-trigger 内核转储"
-    echo "  Layer4 - 系统资源: 内存, 网络(ip/iwconfig/ifconfig/ss), D状态进程检测"
+    echo "  Layer4 - 系统资源: 内存, 网络(ip/iwconfig/ifconfig/ss), D状态进程, todesk日志"
     echo "  Layer5 - 应用日志: journalctl 多启动历史日志"
     echo "  Layer6 - 完整性校验: 自动检查所有日志文件可读且非空"
     echo "======================================================================"
@@ -413,6 +413,87 @@ iostat -x 1 2 > "$LOG_DIR/layer4_iostat.txt" 2>/dev/null
     echo "===== D 状态进程 (完整视图: ps aux) ====="
     ps aux | awk 'NR==1 || $8 ~ /D/ {print $0}'
 } > "$LOG_DIR/layer4_d_state_processes.txt" 2>&1
+
+# --- todesk 日志抓取（服务端 + 客户端）---
+echo "[*] 正在收集：todesk 远程桌面日志..."
+TODESK_SERVER_DIR="/var/log/todesk"
+TODESK_CLIENT_SUBDIR=".local/share/todesk/Logs"
+
+# 抓取服务端日志 (/var/log/todesk/)
+if [ -d "$TODESK_SERVER_DIR" ] && [ -r "$TODESK_SERVER_DIR" ]; then
+    mkdir -p "$LOG_DIR/todesk_server"
+    cp -r "$TODESK_SERVER_DIR"/* "$LOG_DIR/todesk_server/" 2>/dev/null && \
+        echo "    [✓] todesk 服务端日志已抓取: $TODESK_SERVER_DIR" || \
+        echo "    [!] todesk 服务端日志复制失败"
+elif [ "$RUN_MODE" = "nosudo" ]; then
+    echo "    [!] nosudo 模式，无法读取 $TODESK_SERVER_DIR（需 root 权限）"
+else
+    echo "    [!] todesk 服务端日志目录不存在: $TODESK_SERVER_DIR"
+fi
+
+# 定位 todesk 客户端日志的真实用户
+TODESK_CLIENT_USERS=()
+
+# 方式1: sudo 模式下，SUDO_USER 即实际操作用户
+if [ "$RUN_MODE" = "sudo" ] && [ -n "${SUDO_USER:-}" ]; then
+    UHOME=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+    [ -z "$UHOME" ] && UHOME="/home/$SUDO_USER"
+    if [ -d "$UHOME/$TODESK_CLIENT_SUBDIR" ]; then
+        TODESK_CLIENT_USERS+=("$SUDO_USER:$UHOME")
+    fi
+fi
+
+# 方式2: 扫描 /home 下所有用户目录
+for userhome in /home/*/; do
+    uname=$(basename "$userhome")
+    # 避免重复
+    already_found=false
+    for entry in "${TODESK_CLIENT_USERS[@]}"; do
+        if [ "${entry%%:*}" = "$uname" ]; then
+            already_found=true
+            break
+        fi
+    done
+    if [ "$already_found" = false ] && [ -d "$userhome$TODESK_CLIENT_SUBDIR" ]; then
+        TODESK_CLIENT_USERS+=("$uname:$userhome")
+    fi
+done
+
+# 方式3: 通过 ps 查找正在运行的 todesk 进程所属用户
+if [ ${#TODESK_CLIENT_USERS[@]} -eq 0 ]; then
+    ps_user=$(ps -eo user,comm 2>/dev/null | grep -i todesk | awk '{print $1}' | sort -u | head -1)
+    if [ -n "$ps_user" ] && [ "$ps_user" != "root" ]; then
+        PSHOME=$(getent passwd "$ps_user" 2>/dev/null | cut -d: -f6)
+        [ -z "$PSHOME" ] && PSHOME="/home/$ps_user"
+        if [ -d "$PSHOME/$TODESK_CLIENT_SUBDIR" ]; then
+            TODESK_CLIENT_USERS+=("$ps_user:$PSHOME")
+        fi
+    fi
+fi
+
+# nosudo 模式下兜底：尝试当前用户
+if [ ${#TODESK_CLIENT_USERS[@]} -eq 0 ] && [ "$RUN_MODE" = "nosudo" ]; then
+    if [ -d "$HOME/$TODESK_CLIENT_SUBDIR" ]; then
+        TODESK_CLIENT_USERS+=("$(whoami):$HOME")
+    fi
+fi
+
+# 抓取客户端日志
+if [ ${#TODESK_CLIENT_USERS[@]} -gt 0 ]; then
+    for entry in "${TODESK_CLIENT_USERS[@]}"; do
+        tuser="${entry%%:*}"
+        thome="${entry##*:}"
+        T_CLIENT_DIR="$thome/$TODESK_CLIENT_SUBDIR"
+        if [ -d "$T_CLIENT_DIR" ] && [ -r "$T_CLIENT_DIR" ]; then
+            mkdir -p "$LOG_DIR/todesk_client_${tuser}"
+            cp -r "$T_CLIENT_DIR"/* "$LOG_DIR/todesk_client_${tuser}/" 2>/dev/null && \
+                echo "    [✓] todesk 客户端日志已抓取（用户: $tuser）: $T_CLIENT_DIR" || \
+                echo "    [!] todesk 客户端日志（用户: $tuser）复制失败"
+        fi
+    done
+else
+    echo "    [!] 未找到 todesk 客户端日志（todesk 可能未安装或未在此设备运行过）"
+fi
 
 # ==========================================
 # 🔴 第五层：业务与应用层 (Journalctl 深度抓取)
