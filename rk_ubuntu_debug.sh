@@ -602,6 +602,11 @@ if [ "$RUN_MODE" = "sudo" ]; then
             echo "$SYSRQ_VAL" > /proc/sys/kernel/sysrq 2>/dev/null || true
         fi
         
+        # 等待内核将 sysrq 输出完全刷入 ring buffer 和 journald
+        # （echo 写入 trigger 是异步的，立即抓取可能丢失尾部日志）
+        echo "[*] 等待 sysrq 日志落盘（3 秒）..."
+        sleep 3
+        
         # 重新抓取 dmesg（包含 sysrq 导出的内核信息）
         echo "[*] 正在重新抓取 dmesg（含 sysrq 输出）..."
         dmesg -T > "$LOG_DIR/layer3_dmesg_after_sysrq.log" 2>&1
