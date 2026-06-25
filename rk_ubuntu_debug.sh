@@ -422,9 +422,13 @@ TODESK_CLIENT_SUBDIR=".local/share/todesk/Logs"
 # 抓取服务端日志 (/var/log/todesk/)
 if [ -d "$TODESK_SERVER_DIR" ] && [ -r "$TODESK_SERVER_DIR" ]; then
     mkdir -p "$LOG_DIR/todesk_server"
-    cp -r "$TODESK_SERVER_DIR"/* "$LOG_DIR/todesk_server/" 2>/dev/null && \
-        echo "    [✓] todesk 服务端日志已抓取: $TODESK_SERVER_DIR" || \
-        echo "    [!] todesk 服务端日志复制失败"
+    cp -r "$TODESK_SERVER_DIR"/* "$LOG_DIR/todesk_server/" 2>/dev/null || true
+    # 目录级判断：有任一非空文件即视为抓取成功（todesk 存在大量空日志文件）
+    if [ -n "$(find "$LOG_DIR/todesk_server" -type f ! -empty -print -quit 2>/dev/null)" ]; then
+        echo "    [✓] todesk 服务端日志已抓取: $TODESK_SERVER_DIR"
+    else
+        echo "    [!] todesk 服务端日志已复制，但所有文件均为空（可能 todesk 服务未运行过）"
+    fi
 elif [ "$RUN_MODE" = "nosudo" ]; then
     echo "    [!] nosudo 模式，无法读取 $TODESK_SERVER_DIR（需 root 权限）"
 else
@@ -486,9 +490,13 @@ if [ ${#TODESK_CLIENT_USERS[@]} -gt 0 ]; then
         T_CLIENT_DIR="$thome/$TODESK_CLIENT_SUBDIR"
         if [ -d "$T_CLIENT_DIR" ] && [ -r "$T_CLIENT_DIR" ]; then
             mkdir -p "$LOG_DIR/todesk_client_${tuser}"
-            cp -r "$T_CLIENT_DIR"/* "$LOG_DIR/todesk_client_${tuser}/" 2>/dev/null && \
-                echo "    [✓] todesk 客户端日志已抓取（用户: $tuser）: $T_CLIENT_DIR" || \
-                echo "    [!] todesk 客户端日志（用户: $tuser）复制失败"
+            cp -r "$T_CLIENT_DIR"/* "$LOG_DIR/todesk_client_${tuser}/" 2>/dev/null || true
+            # 目录级判断：有任一非空文件即可
+            if [ -n "$(find "$LOG_DIR/todesk_client_${tuser}" -type f ! -empty -print -quit 2>/dev/null)" ]; then
+                echo "    [✓] todesk 客户端日志已抓取（用户: $tuser）: $T_CLIENT_DIR"
+            else
+                echo "    [!] todesk 客户端日志已复制（用户: $tuser），但所有文件均为空"
+            fi
         fi
     done
 else
@@ -617,6 +625,10 @@ echo "[*] 正在进行日志文件完整性校验..."
 VALIDATE_FAIL_COUNT=0
 VALIDATE_TOTAL=0
 while IFS= read -r -d '' f; do
+    # todesk 目录内文件不逐项检查（大量空日志会干扰结果，统一按目录级判断）
+    case "$f" in
+        */todesk_server/*|*/todesk_client_*/*) continue ;;
+    esac
     VALIDATE_TOTAL=$((VALIDATE_TOTAL + 1))
     ISSUES=""
     # 检查可读
@@ -632,6 +644,18 @@ while IFS= read -r -d '' f; do
         VALIDATE_FAIL_COUNT=$((VALIDATE_FAIL_COUNT + 1))
     fi
 done < <(find "$LOG_DIR" -type f -print0 2>/dev/null)
+
+# todesk 目录级校验：有任一非空文件即视为通过
+for tdir in "$LOG_DIR"/todesk_server "$LOG_DIR"/todesk_client_*; do
+    [ -d "$tdir" ] || continue
+    VALIDATE_TOTAL=$((VALIDATE_TOTAL + 1))
+    if [ -n "$(find "$tdir" -type f ! -empty -print -quit 2>/dev/null)" ]; then
+        echo "    [✓] [todesk目录] $(basename "$tdir") — 存在有效日志文件"
+    else
+        echo "    [!] [todesk目录] $(basename "$tdir") — 所有文件均为空"
+        VALIDATE_FAIL_COUNT=$((VALIDATE_FAIL_COUNT + 1))
+    fi
+done
 
 if [ "$VALIDATE_FAIL_COUNT" -gt 0 ]; then
     echo "---------------------------------------------------------"
