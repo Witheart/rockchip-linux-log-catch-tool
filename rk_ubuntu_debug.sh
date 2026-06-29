@@ -367,6 +367,45 @@ lsusb > "$LOG_DIR/layer3_lsusb.txt" 2>&1
 cat /proc/interrupts > "$LOG_DIR/layer3_interrupts.txt" 2>&1
 
 # ==========================================
+# 🟠 第三层附加：pstore 内核崩溃日志 (Kernel Oops/Panic 持久存储)
+# 说明：pstore 用于保存内核崩溃/死机/重启前的最后一刻日志，
+#       /sys/fs/pstore 为内核直接挂载点，/var/lib/systemd/pstore 为 systemd 归档目录。
+#       同时记录各文件的生成时间，便于定位崩溃发生时刻。
+# ==========================================
+PSTORE_SRC_DIRS=("/sys/fs/pstore" "/var/lib/systemd/pstore")
+PSTORE_FOUND_ANY=false
+for pdir in "${PSTORE_SRC_DIRS[@]}"; do
+    if [ -d "$pdir" ] && [ -r "$pdir" ]; then
+        # 检查目录中是否有文件（跳过目录遍历错误）
+        pstore_files=$(find "$pdir" -maxdepth 1 -type f -readable 2>/dev/null)
+        if [ -n "$pstore_files" ]; then
+            PSTORE_FOUND_ANY=true
+            pstore_name="layer3_pstore_$(basename "$pdir")"
+            mkdir -p "$LOG_DIR/$pstore_name"
+            
+            # 先保存文件列表及其时间戳
+            echo "[*] 正在收集 pstore 日志及文件时间戳: $pdir"
+            stat --format='文件名: %n | 大小: %s 字节 | 修改时间: %y | 访问时间: %x | 状态变更: %z' \
+                "$pdir"/* 2>/dev/null > "$LOG_DIR/$pstore_name/_file_timestamps.txt"
+            
+            # 备选：若 stat 不可用，用 ls -la 提供附加格式
+            ls -la --time-style=full-iso "$pdir" 2>/dev/null >> "$LOG_DIR/$pstore_name/_file_timestamps.txt"
+            
+            # 复制所有 pstore 文件
+            cp -r "$pdir"/* "$LOG_DIR/$pstore_name/" 2>/dev/null || true
+            echo "    [✓] pstore 日志已抓取: $pdir -> $LOG_DIR/$pstore_name/"
+        else
+            echo "    [i] pstore 目录存在但无文件: $pdir"
+        fi
+    else
+        echo "    [i] pstore 目录不存在或无权限读取: $pdir"
+    fi
+done
+if [ "$PSTORE_FOUND_ANY" = false ]; then
+    echo "[i] 未发现 pstore 崩溃日志（无历史内核崩溃记录或 pstore 未启用）"
+fi
+
+# ==========================================
 # 🔵 第四层：系统资源与网络层 (Resources & Network)
 # ==========================================
 echo "[*] 正在收集：第四层 系统资源与IO网络堆栈..."
