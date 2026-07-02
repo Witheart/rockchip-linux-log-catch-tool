@@ -13,6 +13,8 @@ set -u
 IGNORE_TOOLS=false
 JOURNAL_BOOTS=10
 J_PROVIDED=false # 用于标记用户是否在命令行传入了 -j 参数
+FOREIGN_COLLECT=false  # 默认不抓取异机 machine-id 历史日志
+FOREIGN_BOOTS=10        # 异机日志抓取启动次数（配合 -f 使用）
 ZIP_PASSWORD="Pi3.14159"
 RUN_MODE="sudo"  # 默认 sudo 模式（向后兼容），可选 nosudo
 
@@ -32,12 +34,18 @@ show_help() {
     echo "                    sudo   = 以 root 权限运行全部命令（需 sudo 执行脚本）"
     echo "                    nosudo = 普通用户模式，跳过需要 root 的操作"
     echo "                    （当系统存在 D 状态进程导致 sudo 卡住时使用）"
+    echo "  -f [数字]         抓取异机 machine-id 历史日志（刷写过 machine-id 的设备）"
+    echo "                    不带数字: 启用，每个旧 machine-id 抓取最近 5 次启动日志"
+    echo "                    带数字:   指定每个旧 machine-id 抓取的启动次数"
+    echo "                    不加 -f : 不抓取异机日志（默认）"
     echo ""
     echo "使用示例:"
     echo "  示例 1 (标准一键抓取) : sudo $0"
     echo "  示例 2 (抓取最近5次开机): sudo $0 -j 5"
     echo "  示例 3 (无网环境强行运行): sudo $0 -i"
     echo "  示例 4 (普通用户模式): $0 -m nosudo"
+    echo "  示例 5 (含异机日志)  : sudo $0 -f"
+    echo "  示例 6 (异机日志指定次数): sudo $0 -f 3"
     echo ""
     echo "主要采集内容:"
     echo "  Layer1 - OS 基础: uname, os-release, 磁盘, 显示环境(DM/协议/DE)"
@@ -77,6 +85,16 @@ while [[ $# -gt 0 ]]; do
             else
                 echo "[-] 错误: -j 参数后需要指定数字"
                 exit 1
+            fi
+            ;;
+        -f)
+            FOREIGN_COLLECT=true
+            # 检查下一个参数是否为数字（可选指定抓取次数）
+            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
+                FOREIGN_BOOTS=$2
+                shift 2
+            else
+                shift
             fi
             ;;
         *)
@@ -611,82 +629,88 @@ fi
 # 🔴 第五层附加A：异机 machine-id 历史日志（刷写过 machine-id 的设备）
 # 说明：客户有时会刷写 /etc/machine-id，导致 journalctl 默认只能看到当前
 #       machine-id 对应的日志，旧日志仍存于 /var/log/journal/<旧id>/ 但不可见。
-#       此处扫描所有非当前 machine-id 的日志目录并用 -D 强制导出。
+#       使用 -f 参数启用，可选 -f N 指定每个旧 machine-id 抓取的启动次数。
 # ==========================================
-JOURNAL_ROOT="/var/log/journal"
-CURRENT_MID=$(cat /etc/machine-id 2>/dev/null || echo "")
-FOREIGN_MID_COUNT=0
+if [ "$FOREIGN_COLLECT" = true ]; then
+    JOURNAL_ROOT="/var/log/journal"
+    CURRENT_MID=$(cat /etc/machine-id 2>/dev/null || echo "")
+    FOREIGN_MID_COUNT=0
 
-if [ -d "$JOURNAL_ROOT" ] && [ -r "$JOURNAL_ROOT" ]; then
-    for mid_dir in "$JOURNAL_ROOT"/*/; do
-        [ -d "$mid_dir" ] || continue
-        mid_name=$(basename "$mid_dir")
-        
-        # 跳过当前 machine-id 对应的目录（前面已通过 journalctl -b 正常抓取）
-        if [ -n "$CURRENT_MID" ] && [ "$mid_name" = "$CURRENT_MID" ]; then
-            continue
-        fi
-        
-        # 跳过非 32 位 hex 目录名（非 machine-id 格式）
-        if ! echo "$mid_name" | grep -qE '^[0-9a-fA-F]{32}$'; then
-            continue
-        fi
-        
-        # 检查是否有可读的 journal 文件
-        if ! find "$mid_dir" -name '*.journal' -readable -print -quit 2>/dev/null | grep -q .; then
-            continue
-        fi
-        
-        FOREIGN_MID_COUNT=$((FOREIGN_MID_COUNT + 1))
-        FM_DIR="$JOURNAL_DIR/foreign_machine_${mid_name}"
-        mkdir -p "$FM_DIR"
-        
-        echo "[*] 发现异机 machine-id 日志目录: $mid_name （可能为刷写前的历史日志）"
-        
-        # 记录该 machine-id 信息
-        echo "machine_id: $mid_name" > "$FM_DIR/_machine_id_info.txt"
-        echo "directory: $mid_dir" >> "$FM_DIR/_machine_id_info.txt"
-        # 尝试从 journal 文件时间戳推断日志时间段
-        ls -la --time-style=full-iso "$mid_dir" 2>/dev/null >> "$FM_DIR/_machine_id_info.txt"
-        
-        # 导出该 machine-id 的启动列表
-        echo "    -> 正在导出启动列表..."
-        journalctl -D "$mid_dir" --list-boots --no-pager \
-            > "$FM_DIR/boot_list.txt" 2>/dev/null || true
-        
-        # 导出该 machine-id 的全部日志（合并所有 boot）
-        echo "    -> 正在导出全部日志（可能较大）..."
-        journalctl -D "$mid_dir" --no-pager --no-hostname \
-            > "$FM_DIR/full_journal.log" 2>/dev/null || true
-        
-        # 尝试按启动次序分别导出（方便定位具体某次开机的问题）
-        FOREIGN_BOOTS=$(journalctl -D "$mid_dir" --list-boots --no-pager 2>/dev/null | wc -l)
-        [ -z "$FOREIGN_BOOTS" ] && FOREIGN_BOOTS=0
-        if [ "$FOREIGN_BOOTS" -gt 0 ] && [ "$FOREIGN_BOOTS" -le "$JOURNAL_BOOTS" ]; then
-            FLIMIT=$FOREIGN_BOOTS
-        elif [ "$FOREIGN_BOOTS" -gt "$JOURNAL_BOOTS" ]; then
-            FLIMIT=$JOURNAL_BOOTS
-        else
-            FLIMIT=0
-        fi
-        for (( fi=0; fi<FLIMIT; fi++ )); do
-            FBOOT_OFFSET=$(( -fi ))
-            FB_TIME=$(journalctl -D "$mid_dir" --list-boots --no-pager 2>/dev/null \
-                | grep -E "^\s*${FBOOT_OFFSET}\s" | awk '{print $3"_"$4}' | tr -d ':/')
-            [ -z "$FB_TIME" ] && FB_TIME="unknown_time"
-            echo "       -> 启动 $FBOOT_OFFSET ($FB_TIME)"
-            journalctl -D "$mid_dir" -b "$FBOOT_OFFSET" --no-pager --no-hostname \
-                > "$FM_DIR/boot_${FBOOT_OFFSET}_${FB_TIME}.log" 2>/dev/null || true
+    echo "[*] 正在扫描异机 machine-id 历史日志（每个旧 ID 抓取最近 $FOREIGN_BOOTS 次启动）..."
+
+    if [ -d "$JOURNAL_ROOT" ] && [ -r "$JOURNAL_ROOT" ]; then
+        for mid_dir in "$JOURNAL_ROOT"/*/; do
+            [ -d "$mid_dir" ] || continue
+            mid_name=$(basename "$mid_dir")
+            
+            # 跳过当前 machine-id 对应的目录（前面已通过 journalctl -b 正常抓取）
+            if [ -n "$CURRENT_MID" ] && [ "$mid_name" = "$CURRENT_MID" ]; then
+                continue
+            fi
+            
+            # 跳过非 32 位 hex 目录名（非 machine-id 格式）
+            if ! echo "$mid_name" | grep -qE '^[0-9a-fA-F]{32}$'; then
+                continue
+            fi
+            
+            # 检查是否有可读的 journal 文件
+            if ! find "$mid_dir" -name '*.journal' -readable -print -quit 2>/dev/null | grep -q .; then
+                continue
+            fi
+            
+            FOREIGN_MID_COUNT=$((FOREIGN_MID_COUNT + 1))
+            FM_DIR="$JOURNAL_DIR/foreign_machine_${mid_name}"
+            mkdir -p "$FM_DIR"
+            
+            echo "[*] 发现异机 machine-id 日志目录: $mid_name （可能为刷写前的历史日志）"
+            
+            # 记录该 machine-id 信息
+            echo "machine_id: $mid_name" > "$FM_DIR/_machine_id_info.txt"
+            echo "directory: $mid_dir" >> "$FM_DIR/_machine_id_info.txt"
+            # 尝试从 journal 文件时间戳推断日志时间段
+            ls -la --time-style=full-iso "$mid_dir" 2>/dev/null >> "$FM_DIR/_machine_id_info.txt"
+            
+            # 导出该 machine-id 的启动列表
+            echo "    -> 正在导出启动列表..."
+            journalctl -D "$mid_dir" --list-boots --no-pager \
+                > "$FM_DIR/boot_list.txt" 2>/dev/null || true
+            
+            # 导出该 machine-id 的全部日志（合并所有 boot）
+            echo "    -> 正在导出全部日志（可能较大）..."
+            journalctl -D "$mid_dir" --no-pager --no-hostname \
+                > "$FM_DIR/full_journal.log" 2>/dev/null || true
+            
+            # 尝试按启动次序分别导出（方便定位具体某次开机的问题）
+            FM_BOOT_COUNT=$(journalctl -D "$mid_dir" --list-boots --no-pager 2>/dev/null | wc -l)
+            [ -z "$FM_BOOT_COUNT" ] && FM_BOOT_COUNT=0
+            if [ "$FM_BOOT_COUNT" -gt 0 ] && [ "$FM_BOOT_COUNT" -le "$FOREIGN_BOOTS" ]; then
+                FLIMIT=$FM_BOOT_COUNT
+            elif [ "$FM_BOOT_COUNT" -gt "$FOREIGN_BOOTS" ]; then
+                FLIMIT=$FOREIGN_BOOTS
+            else
+                FLIMIT=0
+            fi
+            for (( fi=0; fi<FLIMIT; fi++ )); do
+                FBOOT_OFFSET=$(( -fi ))
+                FB_TIME=$(journalctl -D "$mid_dir" --list-boots --no-pager 2>/dev/null \
+                    | grep -E "^\s*${FBOOT_OFFSET}\s" | awk '{print $3"_"$4}' | tr -d ':/')
+                [ -z "$FB_TIME" ] && FB_TIME="unknown_time"
+                echo "       -> 启动 $FBOOT_OFFSET ($FB_TIME)"
+                journalctl -D "$mid_dir" -b "$FBOOT_OFFSET" --no-pager --no-hostname \
+                    > "$FM_DIR/boot_${FBOOT_OFFSET}_${FB_TIME}.log" 2>/dev/null || true
+            done
+            
+            echo "    [✓] 异机 machine-id($mid_name) 日志导出完成"
         done
-        
-        echo "    [✓] 异机 machine-id($mid_name) 日志导出完成"
-    done
-fi
+    fi
 
-if [ "$FOREIGN_MID_COUNT" -eq 0 ]; then
-    echo "[i] 未发现异机 machine-id 历史日志（无刷写记录或日志已清理）"
+    if [ "$FOREIGN_MID_COUNT" -eq 0 ]; then
+        echo "[i] 未发现异机 machine-id 历史日志（无刷写记录或日志已清理）"
+    else
+        echo "[✓] 共发现 $FOREIGN_MID_COUNT 个异机 machine-id 日志目录，已导出至 $JOURNAL_DIR/foreign_machine_*/"
+    fi
 else
-    echo "[✓] 共发现 $FOREIGN_MID_COUNT 个异机 machine-id 日志目录，已导出至 $JOURNAL_DIR/foreign_machine_*/"
+    echo "[i] 已跳过异机 machine-id 历史日志（使用 -f 参数启用，-f N 可指定抓取次数）"
 fi
 
 # ==========================================
